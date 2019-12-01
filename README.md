@@ -1,0 +1,2 @@
+# cherenkov
+FTL compatible server
