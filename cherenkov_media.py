@@ -8,10 +8,11 @@ gi.require_version('GObject', '2.0')
 from gi.repository import GLib, GObject, Gst
 
 class FTL_Media:
-    def __init__(self):
+    def __init__(self, port = 8309):
         Gst.init(None)
         self.loop = GLib.MainLoop()
         self.pipe = Gst.Pipeline()
+        self.port = port
 
     def addElement(self, element_name, properties = {}):
         elm = Gst.ElementFactory.make(element_name)
@@ -25,7 +26,7 @@ class FTL_Media:
         videocaps = Gst.Caps.from_string("application/x-rtp, media=(string)video, clock-rate=(int)90000, encoding-name=(string)H264, payload=(int)96, width=(string)1280, height=(string)720")
         audiocaps = Gst.Caps.from_string("application/x-rtp, media=audio, clock-rate=48000, encoding-name=OPUS, payload=97")
 
-        self.udpsrc = self.addElement('udpsrc', {'port': 8309}) #, 'caps': videocaps})
+        self.udpsrc = self.addElement('udpsrc', {'port': self.port}) #, 'caps': videocaps})
         self.tee = self.addElement('tee')
 
         self.vfilter = self.addElement('capsfilter', {'caps': videocaps})
@@ -101,7 +102,7 @@ class FTL_Media:
         pad.link(self.rtpopusdepay.get_static_pad('sink'))
 
 
-def main(args):
+def main(argv):
     print("Cherenkov Media")
     ftl_media = FTL_Media()
     ftl_media.setup()
