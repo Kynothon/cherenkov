@@ -3,16 +3,23 @@ import argparse
 import hashlib
 import logging
 import asyncio
+import secrets
+import random
 import enum
 import hmac
+
+keys = {'118403022': 'jHoiulkMZ80oGIvLwZCNsSu4DVR70zS4'}
 
 class Stream:
     def __init__(self, reader, writer, logger):
         # TODO: Make port random
-        self.port = 8309
+        self.media_port = random.randrange(8300, 8399)
+        self.timeout = 10.0
         self.reader = reader
         self.writer = writer
         self.logger = logger
+        self.stream_kid = ""
+        self.metadata = {}
 
     async def read(self):
         message = ""
@@ -28,10 +35,9 @@ class Stream:
     async def hmac(self):
         message = await self.read()
         if message.startswith("HMAC"):
-            # TODO: Do Not hardcode the values
-            signature = hmac.new("secret".encode(), "body".encode(), digestmod=hashlib.sha512).hexdigest()
-            self.logger.info(f"HMAC: {signature}")
-            self.writer.write(f"200 {signature}\n".encode())
+            self.nonce = secrets.token_hex(64)
+            self.logger.info(f"nonce: {self.nonce}")
+            self.writer.write(f"200 {self.nonce}\n".encode())
         elif message.startswith("DISCONNECT"):
             self.writer.write(f"200 DISCONNECT\n".encode())
         else:
@@ -40,32 +46,44 @@ class Stream:
     async def connect(self):
         message = await self.read()
         if message.startswith("CONNECT"):
-            # TODO: Do something with the connection data CONNECT[ ]<STREAM_KEY_PREFIX>[]$???
-            self.logger.info(f"CONNECTION Accepted {' '.join(message.split()[1:])}")
-            self.writer.write(f"200 Accepted, go ahead with stream metadata\n".encode())
+            parsed = message.split(' ')
+            self.stream_kid = parsed[1]
+            # The ftl_sdk seems to use the 1st half of the nonce
+            # OBS uses the full nonce
+            signature_obs = hmac.new(keys[self.stream_kid].encode(), bytes.fromhex(self.nonce), digestmod=hashlib.sha512).hexdigest()
+            signature_sdk = hmac.new(keys[self.stream_kid].encode(), self.nonce[:(int(len(self.nonce) /2 ))].encode(), digestmod=hashlib.sha512).hexdigest()
+            if parsed[2][1:] != signature_obs and parsed[2][1:] != signature_sdk:
+                self.logger.error("mismatch signature")
+                self.writer.write("401 STREAM REJECTED\n".encode())
+                raise Exception("Mismatched signature")
+            else:
+                self.logger.info(f"CONNECTION Accepted {' '.join(parsed[1:])}")
+                self.writer.write(f"200 Accepted, go ahead with stream metadata\n".encode())
         elif message.startswith("DISCONNECT"):
             self.writer.write(f"200 DISCONNECT\n".encode())
         else:
             raise Exception("Expected CONNECT")
 
     async def stream_config(self):
-        while True:
+        isEnd = False
+        while not isEnd:
             message = await self.read()
-            isEnd = any(item.startswith('.') for item in message.splitlines())
-            # TODO: Parse the metadata
-            self.logger.info(f"stream metadata: \"{message}\"")
-            if isEnd:
-                self.logger.info("Received all metatada")
-                self.writer.write(f"200 Parameters Accepted. Use UDP port {self.port}\n".encode())
-                break
+            for line in message.splitlines():
+                parsed = line.split(':')
+                if line.startswith('.'):
+                    isEnd = True
+                elif len(parsed) == 2:
+                    self.metadata[parsed[0]] = parsed[1].strip()
+        self.logger.info(f"Received all metatada: {self.metadata}")
+        self.logger.info(f"Ready to receive data on UDP {self.media_port}")
+        self.writer.write(f"200 Parameters Accepted. Use UDP port {self.media_port}\n".encode())
 
     async def keepalive(self):
         while True:
-            message = await self.read()
+            message = await asyncio.wait_for(self.read(), timeout=self.timeout)
             if message.startswith("PING"):
-                # TODO: Verify PING value matches stream key prefix
-                # TODO: Add timeout 
-                self.logger.info("Ping")
+                prefix = message[len("PING "):]
+                self.logger.info(f"Ping {prefix}")
                 self.writer.write("201 PING\n".encode())
             elif message.startswith("DISCONNECT"):
                 self.writer.write(f"200 DISCONNECT\n".encode())
@@ -74,17 +92,15 @@ class Stream:
             else:
                 raise Exception("PING failure")
 
-
-    async def idk(self):
-        message = await self.read()
-        print(f"message: {message}")
-        raise Exception("blip")
-
-class Signalling:
-    def __init__(self, address = "0.0.0.0", port=8084, logger=None):
-        self.address = address
-        self.port = port
-        self.logger = logger
+class Server:
+    def __init__(self, args):
+        self.port = args.port
+        self.address = "0.0.0.0"
+        self.verbose = args.verbose
+        self.logger = logging.getLogger()
+        if self.verbose:
+            logging.basicConfig(level=logging.DEBUG)
+        self.logger.debug("logging level: verbose")
 
     async def handle_stream(self, reader, writer):
         addr = writer.get_extra_info('peername')
@@ -96,6 +112,10 @@ class Signalling:
             await session.connect()
             await session.stream_config()
             await session.keepalive()
+        except EOFError:
+            self.logger.warning(f"Client {addr} terminated connection")
+        except asyncio.TimeoutError:
+            self.logger.warning(f"Client {addr} missed the timeout")
         except Exception as exeption: 
             print(f"Received Exception: {exeption}")
         finally:
@@ -103,29 +123,15 @@ class Signalling:
             print("Close the connection")
             writer.close()
 
-
     async def run(self):
         server = await asyncio.start_server(
-        self.handle_stream, self.address, self.port)
+            self.handle_stream, self.address, self.port)
 
         addr = server.sockets[0].getsockname()
         print(f'Serving on {addr}')
 
         async with server:
             await server.serve_forever()
-
-
-class Server:
-    def __init__(self, args):
-        self.port = args.port
-        self.verbose = args.verbose
-        self.logger = logging.getLogger()
-        if self.verbose:
-            logging.basicConfig(level=logging.DEBUG)
-        self.logger.debug("logging level: verbose")
-
-    async def run(self):
-        await Signalling(port = self.port, logger=self.logger).run()
 
 def uint16(value):
     ivalue = int(value)
