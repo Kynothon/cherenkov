@@ -43,20 +43,22 @@ class Stream:
         else:
             raise Exception("Expected HMAC")
 
+    def get_stream_key(self, stream_kid):
+        return keys[stream_kid]
+
     async def connect(self):
         message = await self.read()
         if message.startswith("CONNECT"):
             parsed = message.split(' ')
-            self.stream_kid = parsed[1]
-            # The ftl_sdk seems to use the 1st half of the nonce
-            # OBS uses the full nonce
-            signature_obs = hmac.new(keys[self.stream_kid].encode(), bytes.fromhex(self.nonce), digestmod=hashlib.sha512).hexdigest()
-            signature_sdk = hmac.new(keys[self.stream_kid].encode(), self.nonce[:(int(len(self.nonce) /2 ))].encode(), digestmod=hashlib.sha512).hexdigest()
-            if parsed[2][1:] != signature_obs and parsed[2][1:] != signature_sdk:
+            digest = hmac.new(self.get_stream_key(parsed[1]).encode(), 
+            bytes.fromhex(self.nonce), 
+            digestmod=hashlib.sha512).hexdigest()
+            if parsed[2][1:] != digest:
                 self.logger.error("mismatch signature")
                 self.writer.write("401 STREAM REJECTED\n".encode())
                 raise Exception("Mismatched signature")
             else:
+                self.stream_kid = parsed[1]
                 self.logger.info(f"CONNECTION Accepted {' '.join(parsed[1:])}")
                 self.writer.write(f"200 Accepted, go ahead with stream metadata\n".encode())
         elif message.startswith("DISCONNECT"):
